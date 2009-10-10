@@ -1,0 +1,14 @@
+#summary Instructions on compiling Wiiflow.
+#labels Featured
+
+= Introduction =
+
+1. Download and install [http://www.devkitpro.org/devkitppc/devkitppc-release-18-is-final/ devkitPPC r18].
+
+2. Download the source from [http://wiiflow.googlecode.com/svn/trunk/ SVN].
+
+3. Run Programmer's Notepad (installed with devkitPro)
+
+4. Open the Makefile from the source you downloaded. Click Tools > Make.
+
+5. Done! 
