@@ -3,9 +3,9 @@
 
 = Introduction =
 
-1. Download and install latest devkitProPPC *r19*
+1. Download and install latest devkitProPPC r18 or r19
 
-2. Download [http://wiiflow.googlecode.com/files/libogc-21-11-2009-R19.zip libogc-21-11-2009-R19] and extract it to your devkitPro directory.
+2. Download [http://wiiflow.googlecode.com/files/libogc-23-10-09-DevkitR18-19.zip libogc-23-10-09-DevkitR18-19.zip] and extract it to your devkitPro directory.
 
 2. Download the source from [http://wiiflow.googlecode.com/svn/trunk/ SVN].
 
