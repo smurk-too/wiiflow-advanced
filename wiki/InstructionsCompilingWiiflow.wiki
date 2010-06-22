@@ -5,7 +5,7 @@
 
 1. Download and install [http://sourceforge.net/projects/devkitpro/ devkitpro with the latest devkitPPC]
 
-2. Download [http://code.google.com/p/wiiflow/downloads/detail?name=r43%2Blibogc%2BRequired%20Libs%28use%20PPC%20r21%29.zip&can=2&q= r43+libogc+Required Libs(use PPC r21).zip] and extract it to your devkitPro directory.
+2. Download [http://wiiflow.googlecode.com/files/portlibs.zip portlibs.zip] and extract it to your devkitPro directory.
 
 2. Download the source from [http://wiiflow.googlecode.com/svn/trunk/ SVN].
 
