@@ -2,7 +2,7 @@
 #The WiiFlowiki describes all things wiiflow
 
 = WiifloWiki =
-Since the changes to wiiflow have been coming so fast, it has been hard to keep up with the readmes and communicating instructions to use new features to our faithful followers.  In order to simplify it, and allow people to contribute to this information, we have started a  *[http://sites.google.com/site/wiiflowiki/ WiiFlowWiki]*
+Since the changes to wiiflow have been coming so fast, it has been hard to keep up with the readmes and communicating instructions to use new features to our faithful followers.  In order to simplify it, and allow people to contribute to this information, we have started a  wiki at *[http://www.wiiflowiki.com www.wiiflowiki.com]*
 
 This wiki is yet incomplete but contains alot of very useful information about almost anything you can ask about wiiflow.  
 
