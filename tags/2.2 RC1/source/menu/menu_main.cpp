@@ -1,0 +1,688 @@
+
+#include "menu.hpp"
+#include "loader/wdvd.h"
+#include "network/gcard.h"
+
+#include <unistd.h>
+#include <fstream>
+#include <sys/stat.h>
+
+#include "loader/fs.h"
+#include "wbfs.h"
+#include "gecko.h"
+#include "sys.h"
+#include "disc.h"
+
+using namespace std;
+
+extern const u8 btnconfig_png[];
+extern const u8 btnconfigs_png[];
+extern const u8 btninfo_png[];
+extern const u8 btninfos_png[];
+extern const u8 btnquit_png[];
+extern const u8 btnquits_png[];
+extern const u8 btnnext_png[];
+extern const u8 btnnexts_png[];
+extern const u8 btnprev_png[];
+extern const u8 btnprevs_png[];
+extern const u8 btnchannel_png[];
+extern const u8 btnchannels_png[];
+extern const u8 btnusb_png[];
+extern const u8 btnusbs_png[];
+extern const u8 btndvd_png[];
+extern const u8 btndvds_png[];
+extern const u8 favoriteson_png[];
+extern const u8 favoritesons_png[];
+extern const u8 favoritesoff_png[];
+extern const u8 favoritesoffs_png[];
+
+static inline int loopNum(int i, int s)
+{
+	return i < 0 ? (s - (-i % s)) % s : i % s;
+}
+
+void CMenu::_hideMain(bool instant)
+{
+	m_btnMgr.hide(m_mainBtnNext, instant);
+	m_btnMgr.hide(m_mainBtnPrev, instant);
+	m_btnMgr.hide(m_mainBtnConfig, instant);
+	m_btnMgr.hide(m_mainBtnInfo, instant);
+	m_btnMgr.hide(m_mainBtnQuit, instant);
+	m_btnMgr.hide(m_mainBtnHomebrew, instant);
+	m_btnMgr.hide(m_mainBtnChannel, instant);
+	m_btnMgr.hide(m_mainBtnUsb, instant);
+	m_btnMgr.hide(m_mainBtnDVD, instant);
+	m_btnMgr.hide(m_mainBtnInit, instant);
+	m_btnMgr.hide(m_mainBtnInit2, instant);
+	m_btnMgr.hide(m_mainLblInit, instant);
+	m_btnMgr.hide(m_mainBtnFavoritesOn, instant);
+	m_btnMgr.hide(m_mainBtnFavoritesOff, instant);
+	m_btnMgr.hide(m_mainLblLetter, instant);
+	m_btnMgr.hide(m_mainLblNotice, instant);
+	for (u32 i = 0; i < ARRAY_SIZE(m_mainLblUser); ++i)
+		if (m_mainLblUser[i] != -1u)
+			m_btnMgr.hide(m_mainLblUser[i], instant);
+}
+
+void CMenu::_showMain(void)
+{
+	_hideWaitMessage();
+	
+	m_vid.set2DViewport(m_cfg.getInt("GENERAL", "tv_width", 640), m_cfg.getInt("GENERAL", "tv_height", 480),
+		m_cfg.getInt("GENERAL", "tv_x", 0), m_cfg.getInt("GENERAL", "tv_y", 0));
+
+	_setBg(m_gameBg, m_gameBgLQ);
+	m_btnMgr.show(m_mainBtnConfig);
+	m_btnMgr.show(m_mainBtnInfo);
+	m_btnMgr.show(m_mainBtnQuit);
+
+	switch(m_current_view)
+	{
+		case COVERFLOW_HOMEBREW:
+			m_btnMgr.show(m_mainBtnUsb);
+			break;
+		case COVERFLOW_CHANNEL:
+			m_btnMgr.show(m_mainBtnUsb);
+			//m_btnMgr.show(m_mainBtnHomebrew);
+			break;
+		case COVERFLOW_USB:
+		default:
+			m_btnMgr.show(m_mainBtnChannel);
+			break;
+	}
+
+	for (u32 i = 1; i < ARRAY_SIZE(m_mainLblUser); ++i)
+		if (m_mainLblUser[i] != -1u)
+			m_btnMgr.show(m_mainLblUser[i]);
+
+	if (m_gameList.empty())
+	{
+		m_btnMgr.show(m_mainBtnInit);
+		m_btnMgr.show(m_mainBtnInit2);
+		m_btnMgr.show(m_mainLblInit);
+	}
+}
+
+int CMenu::GetCoverStatusAsync(CMenu *m)
+{
+	u32 disc_check = 0;
+	WDVD_GetCoverStatus(&disc_check);
+	m->m_initialCoverStatusComplete = true;
+	return 0;
+}
+
+int CMenu::main(void)
+{
+	wstringEx curLetter;
+	string prevTheme = m_cfg.getString("GENERAL", "theme", "default");
+	bool use_grab = m_cfg.getBool("GENERAL", "use_grab", false);
+	m_reload = false;
+	static u32 disc_check = 0;
+	int done = 0;
+
+	// Start network asynchronious, if configured and required
+	if (m_cfg.getBool("GENERAL", "async_network", false) || has_enabled_providers())
+		_initAsyncNetwork();
+
+	SetupInput();
+	_loadList();
+	_searchMusic();
+	_startMusic();
+	_updateWiiTDB();
+	_showMain();
+	m_curGameId.clear();
+	_initCF();
+
+	lwp_t coverStatus = LWP_THREAD_NULL;
+	LWP_CreateThread(&coverStatus, (void *(*)(void *))CMenu::GetCoverStatusAsync, (void *)this, 0, 8192, 40);
+
+	while (true)
+	{
+		_mainLoopCommon(true);
+
+		if (m_initialCoverStatusComplete)
+			WDVD_GetCoverStatus(&disc_check);
+
+		//Check for exit or reload request
+		if (BTN_HOME_PRESSED)
+		{
+			if(!m_locked && !m_disable_exit)
+			{
+				struct stat dummy;
+				if(BTN_PLUS_HELD) Sys_ExitTo(EXIT_TO_HBC);
+				else if(BTN_MINUS_HELD) Sys_ExitTo(EXIT_TO_MENU);
+				else if(BTN_1_HELD) Sys_ExitTo(EXIT_TO_PRIILOADER);
+				else if(BTN_2_HELD)	//Check that the files are there, or ios will hang.
+				{
+					if(FS_SDAvailable() && stat("sd:/bootmii/armboot.bin", &dummy) == 0 && stat("sd:/bootmii/ppcboot.elf", &dummy) == 0)
+						Sys_ExitTo(EXIT_TO_BOOTMII);
+					else  Sys_ExitTo(EXIT_TO_HBC);
+				}
+			}
+			m_reload = (BTN_B_HELD || m_disable_exit);
+			break;
+		}
+		m_btnMgr.noClick(true);
+		if (!m_btnMgr.selected(m_mainBtnQuit) && !BTN_B_HELD && (BTN_UP_REPEAT || RIGHT_STICK_UP))
+			m_cf.up();
+		if (!m_btnMgr.selected(m_mainBtnQuit) && ((!BTN_B_HELD && (BTN_RIGHT_REPEAT || RIGHT_STICK_RIGHT)) || WROLL_RIGHT))
+			m_cf.right();
+		if (!m_btnMgr.selected(m_mainBtnQuit) && !BTN_B_HELD && (BTN_DOWN_REPEAT ||  RIGHT_STICK_DOWN))
+			m_cf.down();
+		if (!m_btnMgr.selected(m_mainBtnQuit) && ((!BTN_B_HELD && (BTN_LEFT_REPEAT || RIGHT_STICK_LEFT)) || WROLL_LEFT))
+			m_cf.left();
+		m_btnMgr.noClick(false);
+		//CF Layout select
+		if (!BTN_B_HELD && BTN_1_PRESSED)
+		{
+			int cfVersion = 1 + loopNum(m_cfg.getInt("GENERAL", "last_cf_mode", 1), m_numCFVersions);
+			_loadCFLayout(cfVersion);
+			m_cf.applySettings();
+			m_cfg.setInt("GENERAL", "last_cf_mode", cfVersion);
+		}
+		else if (!BTN_B_HELD && BTN_2_PRESSED)
+		{
+			int cfVersion = 1 + loopNum(m_cfg.getInt("GENERAL", "last_cf_mode", 1) - 2, m_numCFVersions);
+			_loadCFLayout(cfVersion);
+			m_cf.applySettings();
+			m_cfg.setInt("GENERAL", "last_cf_mode", cfVersion);
+		}
+		else if (BTN_B_HELD)
+		{
+			//Search by Alphabet
+			if (BTN_DOWN_PRESSED)
+			{
+				if (m_cfg.getInt("GENERAL", "sort", SORT_ALPHA) != SORT_ALPHA && m_titles_loaded)
+				{
+					m_cf.setSorting((Sorting)SORT_ALPHA);
+					m_cfg.setInt("GENERAL", "sort", SORT_ALPHA);
+				}
+				curLetter.resize(1);
+				curLetter[0] = m_cf.nextLetter();
+				m_showtimer = 60;
+				m_btnMgr.setText(m_mainLblLetter, curLetter);
+				m_btnMgr.show(m_mainLblLetter);
+			}
+			else if (BTN_UP_PRESSED)
+			{
+				if (m_cfg.getInt("GENERAL", "sort", SORT_ALPHA) != SORT_ALPHA && m_titles_loaded)
+				{
+					m_cf.setSorting((Sorting)SORT_ALPHA);
+					m_cfg.setInt("GENERAL", "sort", SORT_ALPHA);
+				}
+				curLetter.resize(1);
+				curLetter[0] = m_cf.prevLetter();
+				m_showtimer = 60;
+				m_btnMgr.setText(m_mainLblLetter, curLetter);
+				m_btnMgr.show(m_mainLblLetter);
+			}
+			//Search by pages
+			else if (BTN_LEFT_PRESSED)
+				m_cf.pageUp();
+			else if (BTN_RIGHT_PRESSED)
+				m_cf.pageDown();
+			//Sorting Selection
+			else if (BTN_PLUS_PRESSED && !m_locked && m_titles_loaded)
+			{
+				u32 sort = 0;
+				sort = m_cfg.getInt("GENERAL", "sort", 0);
+				++sort;
+				if (sort >= 4) sort = 0;
+				m_cf.setSorting((Sorting)sort);
+				m_cfg.setInt("GENERAL", "sort", sort);
+				wstringEx curSort ;
+				if (sort == SORT_ALPHA)
+					curSort = m_loc.getWString(m_curLanguage, "alphabetically", L"Alphabetically");
+				else if (sort == SORT_PLAYCOUNT)
+					curSort = m_loc.getWString(m_curLanguage, "byplaycount", L"By Play Count");
+				else if (sort == SORT_LASTPLAYED)
+					curSort = m_loc.getWString(m_curLanguage, "bylastplayed", L"By Last Played");
+				else if (sort == SORT_GAMEID)
+					curSort = m_loc.getWString(m_curLanguage, "bygameid", L"By Game I.D.");
+				m_showtimer=60; 
+				m_btnMgr.setText(m_mainLblNotice, curSort);
+				m_btnMgr.show(m_mainLblNotice);
+			}
+			//Partition Selection
+			else if (BTN_MINUS_PRESSED && !m_locked)
+			{
+				_hideMain();
+				s32 amountOfPartitions = WBFS_GetPartitionCount();
+				s32 currentPartition = WBFS_GetCurrentPartition();
+				char buf[5];
+				currentPartition = loopNum(currentPartition + 1, amountOfPartitions);
+				gprintf("Next item: %d\n", currentPartition);
+				WBFS_GetPartitionName(currentPartition, (char *) &buf);
+				gprintf("Which is: %s\n", buf);
+				m_cfg.setString("GENERAL", "partition", buf);
+				m_showtimer=60; 
+				m_btnMgr.setText(m_mainLblNotice, (string)buf);
+				m_btnMgr.show(m_mainLblNotice);
+				_loadList();
+				_showMain();
+				_initCF();
+			}
+		}
+		if (BTN_B_PRESSED)
+		{
+			//Events to Show Categories
+			if (m_btnMgr.selected(m_mainBtnFavoritesOn) || m_btnMgr.selected(m_mainBtnFavoritesOff))
+			{
+				if (m_current_view == COVERFLOW_USB) // Only supported in game mode (not for channels, since you don't have options for channels yet)
+				{
+					// Event handler to show categories for selection
+					_hideMain();
+					_CategorySettings();
+					_showMain();
+					m_curGameId = m_cf.getId();
+					_initCF();
+				}
+			}
+			/*//Events to Switch off/on nand emu
+			else if (m_btnMgr.selected(m_mainBtnChannel) || m_btnMgr.selected(m_mainBtnUsb))
+			{
+				//switch to nand emu here.
+			}
+			*/
+			else if (m_btnMgr.selected(m_mainBtnPrev))
+			{
+				if (m_cfg.getInt("GENERAL", "sort", SORT_ALPHA) != SORT_ALPHA && m_titles_loaded)
+				{
+					m_cf.setSorting((Sorting)SORT_ALPHA);
+					m_cfg.setInt("GENERAL", "sort", SORT_ALPHA);
+				}
+				curLetter.resize(1);
+				curLetter[0] = m_cf.prevLetter();
+				m_showtimer = 60;
+				m_btnMgr.setText(m_mainLblLetter, curLetter);
+				m_btnMgr.show(m_mainLblLetter);
+			}
+		 	else if (m_btnMgr.selected(m_mainBtnNext))
+			{
+				if (m_cfg.getInt("GENERAL", "sort", SORT_ALPHA) != SORT_ALPHA && m_titles_loaded)
+				{
+					m_cf.setSorting((Sorting)SORT_ALPHA);
+					m_cfg.setInt("GENERAL", "sort", SORT_ALPHA);
+				}
+				curLetter.resize(1);
+				curLetter[0] = m_cf.nextLetter();
+				m_showtimer = 60;
+				m_btnMgr.setText(m_mainLblLetter, curLetter);
+				m_btnMgr.show(m_mainLblLetter);
+			}
+		}
+		else if (done==0 && m_current_view == COVERFLOW_USB && m_cat.getBool("GENERAL", "category_on_start", false)) // Only supported in game mode (not for channels, since you don't have options for channels yet)
+		{
+			done = 1; //set done so it doesnt keep doing it
+			// show categories menu
+			_hideMain();
+			_CategorySettings();
+			_showMain();
+			m_curGameId = m_cf.getId();
+			_initCF();
+		}
+		//Handling input when other gui buttons are selected
+		else if (BTN_A_PRESSED)
+		{
+			if (m_btnMgr.selected(m_mainBtnPrev))
+				m_cf.pageUp();
+		 	else if (m_btnMgr.selected(m_mainBtnNext))
+				m_cf.pageDown();
+			else if (m_btnMgr.selected(m_mainBtnQuit))
+			{
+				if(!m_locked && !m_disable_exit)
+				{
+					struct stat dummy;
+					if(BTN_PLUS_HELD) Sys_ExitTo(EXIT_TO_HBC);
+					else if(BTN_MINUS_HELD) Sys_ExitTo(EXIT_TO_MENU);
+					else if(BTN_1_HELD) Sys_ExitTo(EXIT_TO_PRIILOADER);
+					else if(BTN_2_HELD)	//Check that the files are there, or ios will hang.
+					{
+						if(FS_SDAvailable() && stat("sd:/bootmii/armboot.bin", &dummy) == 0 && stat("sd:/bootmii/ppcboot.elf", &dummy) == 0)
+							Sys_ExitTo(EXIT_TO_BOOTMII);
+						 else Sys_ExitTo(EXIT_TO_HBC);
+					}
+				}
+				m_reload = (BTN_B_HELD || m_disable_exit);
+				break;
+			}
+			else if (m_btnMgr.selected(m_mainBtnChannel) || m_btnMgr.selected(m_mainBtnUsb) || m_btnMgr.selected(m_mainBtnHomebrew))
+			{
+				_showWaitMessage();
+
+				m_btnMgr.hide(m_mainBtnHomebrew, true);
+				m_btnMgr.hide(m_mainBtnChannel, true);
+				m_btnMgr.hide(m_mainBtnUsb, true);
+
+				if (m_current_view == COVERFLOW_USB) 
+				{
+					m_current_view = COVERFLOW_CHANNEL;
+					m_category = 0;
+
+					m_btnMgr.show(m_mainBtnUsb, true);
+					//m_btnMgr.show(m_mainBtnHomebrew);
+				}
+				else if (m_current_view == COVERFLOW_CHANNEL)
+				{
+					m_current_view = COVERFLOW_USB;
+					m_category = m_cat.getInt("GENERAL", "category", 0);
+					
+					m_btnMgr.show(m_mainBtnChannel, true);
+				}
+				else if (0 && m_current_view == COVERFLOW_CHANNEL)
+				{
+					m_current_view = COVERFLOW_HOMEBREW;
+					m_category = 0;
+
+					m_btnMgr.show(m_mainBtnUsb, true);
+				}
+				_loadList();
+				_hideWaitMessage();
+				_initCF();
+			}
+			else if (m_btnMgr.selected(m_mainBtnInit))
+			{
+				if (!m_locked)
+				{
+					_hideMain();
+					_wbfsOp(CMenu::WO_ADD_GAME);
+					if (prevTheme != m_cfg.getString("GENERAL", "theme"))
+					{
+						m_reload = true;
+						break;
+					}
+					_showMain();
+				}
+			}
+			else if (m_btnMgr.selected(m_mainBtnInit2))
+			{
+				_hideMain();
+				_config(7);
+				if (prevTheme != m_cfg.getString("GENERAL", "theme"))
+				{
+					m_reload = true;
+					break;
+				}
+				_showMain();
+			}
+			else if (m_btnMgr.selected(m_mainBtnConfig))
+			{
+				_hideMain();
+				_config(1);
+				if (prevTheme != m_cfg.getString("GENERAL", "theme") || m_reload == true)
+				{
+					m_reload = true;
+					break;
+				}
+				_showMain();
+			}
+			else if (m_btnMgr.selected(m_mainBtnInfo))
+			{
+				_hideMain();
+				_about();
+				 if(m_exit)break;
+				_showMain();
+			}
+			else if (m_btnMgr.selected(m_mainBtnDVD))
+			{
+				_showWaitMessage();
+				_hideMain(true);
+				dir_discHdr hdr;
+				memset(&hdr, 0, sizeof(dir_discHdr));
+				memcpy(&hdr.hdr.id, "dvddvd", 6);
+				_launchGame(&hdr, true);
+				_showMain();
+			}
+			else if (m_btnMgr.selected(m_mainBtnFavoritesOn) || m_btnMgr.selected(m_mainBtnFavoritesOff))
+			{
+				m_favorites = !m_favorites;
+				m_cfg.setInt("GENERAL", "favorites", m_favorites);
+				m_curGameId = m_cf.getId();
+				_initCF();
+			}
+			else if (!m_cf.empty())
+			{
+				if (m_cf.select())
+				{
+					_hideMain();
+					_game(BTN_B_HELD);
+					if(m_exit) break;
+					m_cf.cancel();
+					_showMain();
+				}
+			}
+		}
+		if(use_grab) _getGrabStatus();
+
+		if (m_showtimer > 0)
+			if (--m_showtimer == 0)
+			{
+				m_btnMgr.hide(m_mainLblLetter);
+				m_btnMgr.hide(m_mainLblNotice);
+			}
+		//zones, showing and hiding buttons
+		if (!m_gameList.empty() && m_show_zone_prev)
+			m_btnMgr.show(m_mainBtnPrev);
+		else
+			m_btnMgr.hide(m_mainBtnPrev);
+		if (!m_gameList.empty() && m_show_zone_next)
+			m_btnMgr.show(m_mainBtnNext);
+		else
+			m_btnMgr.hide(m_mainBtnNext);
+		if (!m_gameList.empty() && m_show_zone_main)
+		{
+			m_btnMgr.show(m_mainLblUser[0]);
+			m_btnMgr.show(m_mainLblUser[1]);
+			m_btnMgr.show(m_mainBtnConfig);
+			m_btnMgr.show(m_mainBtnInfo);
+			m_btnMgr.show(m_mainBtnQuit);
+			static bool change = m_favorites;
+			m_btnMgr.show(m_favorites ? m_mainBtnFavoritesOn : m_mainBtnFavoritesOff, change != m_favorites);
+			m_btnMgr.hide(m_favorites ? m_mainBtnFavoritesOff : m_mainBtnFavoritesOn, change != m_favorites);
+			change = m_favorites;
+		}
+		else
+		{
+			m_btnMgr.hide(m_mainLblUser[0]);
+			m_btnMgr.hide(m_mainLblUser[1]);
+			m_btnMgr.hide(m_mainBtnConfig);
+			m_btnMgr.hide(m_mainBtnInfo);
+			m_btnMgr.hide(m_mainBtnQuit);
+			m_btnMgr.hide(m_mainBtnFavoritesOn);
+			m_btnMgr.hide(m_mainBtnFavoritesOff);
+		}
+		bool hideChannels, showDVD;
+		hideChannels = m_cfg.getBool("GENERAL", "hidechannelsbutton", false);
+		if (!hideChannels && (m_gameList.empty() || m_show_zone_main2))
+		{
+			switch(m_current_view)
+			{
+				case COVERFLOW_HOMEBREW:
+					m_btnMgr.show(m_mainBtnUsb);
+					break;
+				case COVERFLOW_CHANNEL:
+					//m_btnMgr.show(m_mainBtnHomebrew);
+					m_btnMgr.show(m_mainBtnUsb);
+					break;
+				case COVERFLOW_USB:
+				default:
+					m_btnMgr.show(m_mainBtnChannel);
+					break;
+			}
+			m_btnMgr.show(m_mainLblUser[2]);
+			m_btnMgr.show(m_mainLblUser[3]);
+		}
+		else
+		{
+			m_btnMgr.hide(m_mainBtnHomebrew);
+			m_btnMgr.hide(m_mainBtnChannel);
+			m_btnMgr.hide(m_mainBtnUsb);
+			m_btnMgr.hide(m_mainLblUser[2]);
+			m_btnMgr.hide(m_mainLblUser[3]);
+		}
+		showDVD = (disc_check & 0x2);
+		if (showDVD && (m_gameList.empty() || m_show_zone_main3))
+		{
+			m_btnMgr.show(m_mainBtnDVD);
+			m_btnMgr.show(m_mainLblUser[4]);
+			m_btnMgr.show(m_mainLblUser[5]);
+		}
+		else
+		{
+			m_btnMgr.hide(m_mainBtnDVD);
+			m_btnMgr.hide(m_mainLblUser[4]);
+			m_btnMgr.hide(m_mainLblUser[5]);
+		}
+		//
+		for(int chan = WPAD_MAX_WIIMOTES-1; chan >= 0; chan--)
+			if (WPadIR_Valid(chan) || (m_show_pointer[chan] && !WPadIR_Valid(chan)))
+				m_cf.mouse(m_vid, chan, m_cursor[chan].x(), m_cursor[chan].y());
+			else
+				m_cf.mouse(m_vid, chan, -1, -1);		
+	}
+	//
+	GX_InvVtxCache();
+	GX_InvalidateTexAll();
+	m_cf.clear();
+	m_cfg.save();
+	m_cat.save();
+//	m_loc.save();
+	while(!m_initialCoverStatusComplete){}
+	if (m_reload)
+	{
+		_showWaitMessage();
+		return 1;
+	}
+	return 0;
+}
+
+void CMenu::_initMainMenu(CMenu::SThemeData &theme)
+{
+	STexture texQuit;
+	STexture texQuitS;
+	STexture texInfo;
+	STexture texInfoS;
+	STexture texConfig;
+	STexture texConfigS;
+	STexture texDVD;
+	STexture texDVDs;
+	STexture texUsb;
+	STexture texUsbs;
+	STexture texChannel;
+	STexture texChannels;
+	STexture texHomebrew;
+	STexture texHomebrews;
+	STexture texPrev;
+	STexture texPrevS;
+	STexture texNext;
+	STexture texNextS;
+	STexture texFavOn;
+	STexture texFavOnS;
+	STexture texFavOff;
+	STexture texFavOffS;
+	STexture bgLQ;
+	STexture emptyTex;
+
+	m_mainBg = _texture(theme.texSet, "MAIN/BG", "texture", theme.bg);
+	if (m_theme.loaded() && STexture::TE_OK == bgLQ.fromPNGFile(sfmt("%s/%s", m_themeDataDir.c_str(), m_theme.getString("MAIN/BG", "texture").c_str()).c_str(), GX_TF_CMPR, ALLOC_MEM2, 64, 64))
+		m_mainBgLQ = bgLQ;
+
+	texQuit.fromPNG(btnquit_png);
+	texQuitS.fromPNG(btnquits_png);
+	texInfo.fromPNG(btninfo_png);
+	texInfoS.fromPNG(btninfos_png);
+	texConfig.fromPNG(btnconfig_png);
+	texConfigS.fromPNG(btnconfigs_png);
+	texDVD.fromPNG(btndvd_png);
+	texDVDs.fromPNG(btndvds_png);
+	texUsb.fromPNG(btnusb_png);
+	texUsbs.fromPNG(btnusbs_png);
+	texChannel.fromPNG(btnchannel_png);
+	texChannels.fromPNG(btnchannels_png);
+	texHomebrew.fromPNG(favoriteson_png);
+	texHomebrews.fromPNG(favoritesons_png);
+	texPrev.fromPNG(btnprev_png);
+	texPrevS.fromPNG(btnprevs_png);
+	texNext.fromPNG(btnnext_png);
+	texNextS.fromPNG(btnnexts_png);
+	texFavOn.fromPNG(favoriteson_png);
+	texFavOnS.fromPNG(favoritesons_png);
+	texFavOff.fromPNG(favoritesoff_png);
+	texFavOffS.fromPNG(favoritesoffs_png);
+
+	_addUserLabels(theme, m_mainLblUser, ARRAY_SIZE(m_mainLblUser), "MAIN");
+
+	m_mainBtnInfo = _addPicButton(theme, "MAIN/INFO_BTN", texInfo, texInfoS, 20, 412, 48, 48);
+	m_mainBtnConfig = _addPicButton(theme, "MAIN/CONFIG_BTN", texConfig, texConfigS, 70, 412, 48, 48);
+	m_mainBtnQuit = _addPicButton(theme, "MAIN/QUIT_BTN", texQuit, texQuitS, 570, 412, 48, 48);
+	m_mainBtnChannel = _addPicButton(theme, "MAIN/CHANNEL_BTN", texChannel, texChannels, 520, 412, 48, 48);
+	m_mainBtnHomebrew = _addPicButton(theme, "MAIN/HOMEBREW_BTN", texHomebrew, texHomebrews, 520, 412, 48, 48);
+	m_mainBtnUsb = _addPicButton(theme, "MAIN/USB_BTN", texUsb, texUsbs, 520, 412, 48, 48);
+	m_mainBtnDVD = _addPicButton(theme, "MAIN/DVD_BTN", texDVD, texDVDs, 470, 412, 48, 48);
+	m_mainBtnNext = _addPicButton(theme, "MAIN/NEXT_BTN", texNext, texNextS, 540, 146, 80, 80);
+	m_mainBtnPrev = _addPicButton(theme, "MAIN/PREV_BTN", texPrev, texPrevS, 20, 146, 80, 80);
+	m_mainBtnInit = _addButton(theme, "MAIN/BIG_SETTINGS_BTN", theme.titleFont, L"", 72, 180, 496, 96, CColor(0xFFFFFFFF));
+	m_mainBtnInit2 = _addButton(theme, "MAIN/BIG_SETTINGS_BTN2", theme.titleFont, L"", 72, 290, 496, 96, CColor(0xFFFFFFFF));
+	m_mainLblInit = _addLabel(theme, "MAIN/MESSAGE", theme.lblFont, L"", 40, 40, 560, 140, CColor(0xFFFFFFFF), FTGX_JUSTIFY_LEFT | FTGX_ALIGN_MIDDLE);
+	m_mainBtnFavoritesOn = _addPicButton(theme, "MAIN/FAVORITES_ON", texFavOn, texFavOnS, 300, 412, 56, 56);
+	m_mainBtnFavoritesOff = _addPicButton(theme, "MAIN/FAVORITES_OFF", texFavOff, texFavOffS, 300, 412, 56, 56);
+	m_mainLblLetter = _addLabel(theme, "MAIN/LETTER", theme.titleFont, L"", 540, 40, 80, 80, CColor(0xFFFFFFFF), FTGX_JUSTIFY_CENTER | FTGX_ALIGN_MIDDLE, emptyTex);
+	m_mainLblNotice = _addLabel(theme, "MAIN/NOTICE", theme.titleFont, L"", 340, 40, 280, 80, CColor(0xFFFFFFFF), FTGX_JUSTIFY_RIGHT | FTGX_ALIGN_MIDDLE, emptyTex);
+	// 
+	m_mainPrevZone.x = m_theme.getInt("MAIN/ZONES", "prev_x", -32);
+	m_mainPrevZone.y = m_theme.getInt("MAIN/ZONES", "prev_y", -32);
+	m_mainPrevZone.w = m_theme.getInt("MAIN/ZONES", "prev_w", 182);
+	m_mainPrevZone.h = m_theme.getInt("MAIN/ZONES", "prev_h", 382);
+	m_mainPrevZone.hide = m_theme.getBool("MAIN/ZONES", "prev_hide", true);
+	
+	m_mainNextZone.x = m_theme.getInt("MAIN/ZONES", "next_x", 490);
+	m_mainNextZone.y = m_theme.getInt("MAIN/ZONES", "next_y", -32);
+	m_mainNextZone.w = m_theme.getInt("MAIN/ZONES", "next_w", 182);
+	m_mainNextZone.h = m_theme.getInt("MAIN/ZONES", "next_h", 382);
+	m_mainNextZone.hide = m_theme.getBool("MAIN/ZONES", "next_hide", true);
+	
+	m_mainButtonsZone.x = m_theme.getInt("MAIN/ZONES", "buttons_x", -32);
+	m_mainButtonsZone.y = m_theme.getInt("MAIN/ZONES", "buttons_y", 350);
+	m_mainButtonsZone.w = m_theme.getInt("MAIN/ZONES", "buttons_w", 704);
+	m_mainButtonsZone.h = m_theme.getInt("MAIN/ZONES", "buttons_h", 162);
+	m_mainButtonsZone.hide = m_theme.getBool("MAIN/ZONES", "buttons_hide", true);
+
+	m_mainButtonsZone2.x = m_theme.getInt("MAIN/ZONES", "buttons2_x", -32);
+	m_mainButtonsZone2.y = m_theme.getInt("MAIN/ZONES", "buttons2_y", 350);
+	m_mainButtonsZone2.w = m_theme.getInt("MAIN/ZONES", "buttons2_w", 704);
+	m_mainButtonsZone2.h = m_theme.getInt("MAIN/ZONES", "buttons2_h", 162);
+	m_mainButtonsZone2.hide = m_theme.getBool("MAIN/ZONES", "buttons2_hide", true);
+	
+	m_mainButtonsZone3.x = m_theme.getInt("MAIN/ZONES", "buttons3_x", -32);
+	m_mainButtonsZone3.y = m_theme.getInt("MAIN/ZONES", "buttons3_y", 350);
+	m_mainButtonsZone3.w = m_theme.getInt("MAIN/ZONES", "buttons3_w", 704);
+	m_mainButtonsZone3.h = m_theme.getInt("MAIN/ZONES", "buttons3_h", 162);
+	m_mainButtonsZone3.hide = m_theme.getBool("MAIN/ZONES", "buttons3_hide", true);
+	//
+	_setHideAnim(m_mainBtnNext, "MAIN/NEXT_BTN", 0, 0, 0.f, 0.f);
+	_setHideAnim(m_mainBtnPrev, "MAIN/PREV_BTN", 0, 0, 0.f, 0.f);
+	_setHideAnim(m_mainBtnConfig, "MAIN/CONFIG_BTN", 0, 40, 0.f, 0.f);
+	_setHideAnim(m_mainBtnInfo, "MAIN/INFO_BTN", 0, 40, 0.f, 0.f);
+	_setHideAnim(m_mainBtnQuit, "MAIN/QUIT_BTN", 0, 40, 0.f, 0.f);
+	_setHideAnim(m_mainBtnChannel, "MAIN/CHANNEL_BTN", 0, 40, 0.f, 0.f);
+	_setHideAnim(m_mainBtnHomebrew, "MAIN/HOMEBREW_BTN", 0, 40, 0.f, 0.f);
+	_setHideAnim(m_mainBtnUsb, "MAIN/USB_BTN", 0, 40, 0.f, 0.f);
+	_setHideAnim(m_mainBtnDVD, "MAIN/DVD_BTN", 0, 40, 0.f, 0.f);
+	_setHideAnim(m_mainBtnFavoritesOn, "MAIN/FAVORITES_ON", 0, 40, 0.f, 0.f);
+	_setHideAnim(m_mainBtnFavoritesOff, "MAIN/FAVORITES_OFF", 0, 40, 0.f, 0.f);
+	_setHideAnim(m_mainBtnInit, "MAIN/BIG_SETTINGS_BTN", 0, 0, -2.f, 0.f);
+	_setHideAnim(m_mainBtnInit2, "MAIN/BIG_SETTINGS_BTN2", 0, 0, -2.f, 0.f);
+	_setHideAnim(m_mainLblInit, "MAIN/MESSAGE", 0, 0, 0.f, 0.f);
+	_setHideAnim(m_mainLblLetter, "MAIN/LETTER", 0, 0, 0.f, 0.f);
+	_setHideAnim(m_mainLblNotice, "MAIN/NOTICE", 0, 0, 0.f, 0.f);
+	_hideMain(true);
+	_textMain();
+}
+
+void CMenu::_textMain(void)
+{
+	m_btnMgr.setText(m_mainBtnInit, _t("main1", L"Install Game"));
+	m_btnMgr.setText(m_mainBtnInit2, _t("main3", L"Select Partition"));
+	m_btnMgr.setText(m_mainLblInit, _t("main2", L"Welcome to WiiFlow. I have not found any games. Click Install to install games, or Select partition to select your partition type."), true);
+}
+
